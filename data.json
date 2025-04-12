@@ -1,1 +1,14 @@
-{}
+{
+  "6452446617": {
+    "api": {
+      "url": "https://cheapestsmmpanels.com/api/v2",
+      "key": "92acc120c22faf69e89ecb850a0b2ff1",
+      "service": "1160",
+      "quantity": 100
+    },
+    "channels": [
+      "@paisaearn_win",
+      "@HINDInews24hours"
+    ]
+  }
+}
