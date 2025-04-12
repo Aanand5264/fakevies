@@ -11,7 +11,7 @@ from telegram.ext import (
     filters,
 )
 
-TOKEN = "YOUR_BOT_TOKEN"
+TOKEN = "7133802041:AAG2jEd-pB4POfuuJfwlxBGtpzsaYMCowk4"
 DATA_FILE = "data.json"
 
 # Initialize data files
