@@ -10,7 +10,10 @@ from telegram.ext import (
     filters,
 )
 import requests
+from flask import Flask
+from threading import Thread
 
+# === Bot Configuration ===
 TOKEN = "7793831886:AAFTL9FWQDjfT97fSV-51jBCA9Tysz8fsKg"
 DATABASE_NAME = "bot_data.db"
 
@@ -28,7 +31,7 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# Initialize database
+# === Database Functions ===
 def init_db():
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
@@ -54,8 +57,6 @@ def init_db():
     
     conn.commit()
     conn.close()
-
-init_db()
 
 def get_user_data(user_id):
     conn = sqlite3.connect(DATABASE_NAME)
@@ -106,6 +107,7 @@ def save_user_data(user_id, data):
     conn.commit()
     conn.close()
 
+# === Telegram Bot Handlers ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     data = get_user_data(user_id)
@@ -430,6 +432,13 @@ async def handle_new_channel_post(update: Update, context: ContextTypes.DEFAULT_
             print(f"Error processing {post_link} for user {user_id}: {str(e)}")
 
 if __name__ == '__main__':
+    # Start the keep-alive server
+    keep_alive()
+    
+    # Initialize the database
+    init_db()
+    
+    # Create and run the Telegram bot
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
