@@ -1,5 +1,4 @@
 import sqlite3
-import os
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -15,9 +14,12 @@ from flask import Flask
 import threading
 import asyncio
 
-# ======================
-# LOGGING CONFIGURATION
-# ======================
+# ================ CONFIGURATION ================
+TOKEN = "7793831886:AAFTL9FWQDjfT97fSV-51jBCA9Tysz8fsKg"
+DATABASE_NAME = "bot_data.db"
+PORT = 8080
+
+# ================ LOGGING SETUP ================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -26,265 +28,196 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Silence noisy libraries
-logging.getLogger('httpx').setLevel(logging.WARNING)
-logging.getLogger('telegram').setLevel(logging.WARNING)
-logging.getLogger('werkzeug').setLevel(logging.ERROR)
+for lib in ['httpx', 'telegram', 'werkzeug']:
+    logging.getLogger(lib).setLevel(logging.WARNING)
 
-# ==================
-# FLASK APP SETUP
-# ==================
+# ================ FLASK SETUP ================
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    """Silent health check endpoint for Render"""
-    return "", 200
+    return "Bot is running", 200
 
-# ==================
-# BOT CONFIGURATION
-# ==================
-TOKEN = "7793831886:AAFTL9FWQDjfT97fSV-51jBCA9Tysz8fsKg"
-DATABASE_NAME = "bot_data.db"
-
-# ==================
-# DATABASE FUNCTIONS
-# ==================
-def init_db():
-    """Initialize database with proper error handling"""
-    conn = None
-    try:
-        conn = sqlite3.connect(
-            DATABASE_NAME,
-            timeout=10,
-            check_same_thread=False
-        )
-        cursor = conn.cursor()
-        
-        # Users table
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            api_url TEXT,
-            api_key TEXT,
-            service_id TEXT,
-            quantity INTEGER
-        )''')
-        
-        # Channels table
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS channels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            channel_username TEXT,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )''')
-        
-        conn.commit()
-        logger.info("Database initialized successfully")
-    except Exception as e:
-        logger.error(f"Database initialization failed: {str(e)}")
-    finally:
-        if conn:
-            conn.close()
-
-init_db()
-
-def get_user_data(user_id):
-    """Retrieve user data with error handling"""
-    conn = None
-    try:
-        conn = sqlite3.connect(
-            DATABASE_NAME,
-            timeout=10,
-            check_same_thread=False
-        )
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        SELECT api_url, api_key, service_id, quantity 
-        FROM users WHERE user_id = ?
-        ''', (user_id,))
-        api_data = cursor.fetchone()
-        
-        cursor.execute('''
-        SELECT channel_username 
-        FROM channels 
-        WHERE user_id = ?
-        ''', (user_id,))
-        channels = [row[0] for row in cursor.fetchall()]
-        
-        return {
-            "channels": channels,
-            "api": {
-                "url": api_data[0] if api_data else None,
-                "key": api_data[1] if api_data else None,
-                "service": api_data[2] if api_data else None,
-                "quantity": api_data[3] if api_data else None
-            } if api_data else {}
-        }
-    except Exception as e:
-        logger.error(f"Error getting user data: {str(e)}")
-        return {"channels": [], "api": {}}
-    finally:
-        if conn:
-            conn.close()
-
-def save_user_data(user_id, data):
-    """Save user data with error handling"""
-    conn = None
-    try:
-        conn = sqlite3.connect(
-            DATABASE_NAME,
-            timeout=10,
-            check_same_thread=False
-        )
-        cursor = conn.cursor()
-        api = data.get("api", {})
-        
-        # Update user data
-        cursor.execute('''
-        INSERT OR REPLACE INTO users 
-        (user_id, api_url, api_key, service_id, quantity)
-        VALUES (?, ?, ?, ?, ?)
-        ''', (
-            user_id,
-            api.get("url"),
-            api.get("key"),
-            api.get("service"),
-            api.get("quantity")
-        ))
-        
-        # Update channels
-        cursor.execute('DELETE FROM channels WHERE user_id = ?', (user_id,))
-        for channel in data.get("channels", []):
+# ================ DATABASE HANDLING ================
+class Database:
+    @staticmethod
+    def init_db():
+        with sqlite3.connect(DATABASE_NAME, timeout=10, check_same_thread=False) as conn:
+            cursor = conn.cursor()
             cursor.execute('''
-            INSERT INTO channels (user_id, channel_username)
-            VALUES (?, ?)
-            ''', (user_id, channel))
-        
-        conn.commit()
-        logger.info(f"Data saved for user {user_id}")
-    except Exception as e:
-        logger.error(f"Error saving user data: {str(e)}")
-    finally:
-        if conn:
-            conn.close()
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                api_url TEXT,
+                api_key TEXT,
+                service_id TEXT,
+                quantity INTEGER
+            )''')
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                channel_username TEXT,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )''')
+            conn.commit()
+            logger.info("Database initialized")
 
-# ==================
-# BOT HANDLERS
-# ==================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command"""
-    try:
-        user_id = str(update.effective_user.id)
-        logger.info(f"Start command from user {user_id}")
-        
-        keyboard = [
-            [InlineKeyboardButton("#1 🔧 SMM Settings", callback_data="smm_settings")],
-            [InlineKeyboardButton("#2 ➕➖ Channel Add/Remove", callback_data="channel_settings")],
-            [InlineKeyboardButton("#3 💰 Check Balance", callback_data="check_balance")],
-            [InlineKeyboardButton("#4 Order Views 📈", callback_data="order_views")],
-        ]
-        
-        await update.message.reply_text(
-            "Welcome to AEK Bot!",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    except Exception as e:
-        logger.error(f"Error in start handler: {str(e)}")
+    @staticmethod
+    def get_user_data(user_id):
+        with sqlite3.connect(DATABASE_NAME, timeout=10, check_same_thread=False) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT api_url, api_key, service_id, quantity FROM users WHERE user_id = ?', (user_id,))
+            api_data = cursor.fetchone()
+            cursor.execute('SELECT channel_username FROM channels WHERE user_id = ?', (user_id,))
+            channels = [row[0] for row in cursor.fetchall()]
+            
+            return {
+                "channels": channels,
+                "api": {
+                    "url": api_data[0] if api_data else None,
+                    "key": api_data[1] if api_data else None,
+                    "service": api_data[2] if api_data else None,
+                    "quantity": api_data[3] if api_data else None
+                } if api_data else {}
+            }
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all button callbacks"""
-    try:
-        query = update.callback_query
-        await query.answer()
-        user_id = str(query.from_user.id)
-        data = get_user_data(user_id)
-        logger.info(f"Button pressed: {query.data} by {user_id}")
-
-        if query.data == "smm_settings":
+    @staticmethod
+    def save_user_data(user_id, data):
+        with sqlite3.connect(DATABASE_NAME, timeout=10, check_same_thread=False) as conn:
+            cursor = conn.cursor()
             api = data.get("api", {})
-            message = (
-                "🔧 Current SMM API Settings:\n\n"
-                f"🔗 URL: {api.get('url', 'Not set')}\n"
-                f"🔑 Key: {'*' * 8 if api.get('key') else 'Not set'}\n"
-                f"🆔 Service ID: {api.get('service', 'Not set')}\n"
-                f"📊 Default Quantity: {api.get('quantity', 'Not set')}\n\n"
-                "Choose an action:"
-            )
+            
+            cursor.execute('''
+            INSERT OR REPLACE INTO users 
+            (user_id, api_url, api_key, service_id, quantity)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (
+                user_id,
+                api.get("url"),
+                api.get("key"),
+                api.get("service"),
+                api.get("quantity")
+            ))
+            
+            cursor.execute('DELETE FROM channels WHERE user_id = ?', (user_id,))
+            for channel in data.get("channels", []):
+                cursor.execute('INSERT INTO channels (user_id, channel_username) VALUES (?, ?)', (user_id, channel))
+            
+            conn.commit()
+            logger.info(f"Data saved for user {user_id}")
+
+# Initialize database
+Database.init_db()
+
+# ================ BOT HANDLERS ================
+class BotHandlers:
+    @staticmethod
+    async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            user_id = str(update.effective_user.id)
+            logger.info(f"Start command from {user_id}")
             
             keyboard = [
-                [InlineKeyboardButton("➕ Add SMM API", callback_data="add_smm")],
-                [InlineKeyboardButton("🛠 Edit SMM", callback_data="edit_smm")],
+                [InlineKeyboardButton("#1 🔧 SMM Settings", callback_data="smm_settings")],
+                [InlineKeyboardButton("#2 ➕➖ Channel Add/Remove", callback_data="channel_settings")],
+                [InlineKeyboardButton("#3 💰 Check Balance", callback_data="check_balance")],
+                [InlineKeyboardButton("#4 Order Views 📈", callback_data="order_views")],
             ]
-            await query.edit_message_text(
-                message,
+            
+            await update.message.reply_text(
+                "Welcome to AEK Bot!",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
-        
-        elif query.data == "add_smm":
-            context.user_data["add_api_step"] = 1
-            await query.edit_message_text("Please enter SMM API URL:")
-        
-        # [Add other button handlers following the same pattern...]
+        except Exception as e:
+            logger.error(f"Start handler error: {str(e)}")
 
-    except Exception as e:
-        logger.error(f"Error in button handler: {str(e)}")
+    @staticmethod
+    async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            query = update.callback_query
+            await query.answer()
+            user_id = str(query.from_user.id)
+            data = Database.get_user_data(user_id)
+            logger.info(f"Button pressed: {query.data} by {user_id}")
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all text messages"""
-    try:
-        if update.channel_post or not update.effective_user:
-            return
-
-        user_id = str(update.effective_user.id)
-        text = update.message.text
-        data = get_user_data(user_id)
-        logger.info(f"Message from {user_id}: {text[:50]}...")
-
-        if "add_api_step" in context.user_data:
-            step = context.user_data["add_api_step"]
+            if query.data == "smm_settings":
+                api = data.get("api", {})
+                message = (
+                    "🔧 Current SMM API Settings:\n\n"
+                    f"🔗 URL: {api.get('url', 'Not set')}\n"
+                    f"🔑 Key: {'*' * 8 if api.get('key') else 'Not set'}\n"
+                    f"🆔 Service ID: {api.get('service', 'Not set')}\n"
+                    f"📊 Default Quantity: {api.get('quantity', 'Not set')}\n\n"
+                    "Choose an action:"
+                )
+                
+                keyboard = [
+                    [InlineKeyboardButton("➕ Add SMM API", callback_data="add_smm")],
+                    [InlineKeyboardButton("🛠 Edit SMM", callback_data="edit_smm")],
+                ]
+                await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
             
-            if step == 1:
-                context.user_data["api_url"] = text
-                context.user_data["add_api_step"] = 2
-                await update.message.reply_text("Please enter API Key:")
+            elif query.data == "add_smm":
+                context.user_data["add_api_step"] = 1
+                await query.edit_message_text("Please enter SMM API URL:")
             
-            elif step == 2:
-                context.user_data["api_key"] = text
-                context.user_data["add_api_step"] = 3
-                await update.message.reply_text("Please enter Service ID:")
-            
-            elif step == 3:
-                context.user_data["service_id"] = text
-                context.user_data["add_api_step"] = 4
-                await update.message.reply_text("Please enter default quantity:")
-            
-            elif step == 4:
-                try:
-                    data["api"] = {
-                        "url": context.user_data["api_url"],
-                        "key": context.user_data["api_key"],
-                        "service": context.user_data["service_id"],
-                        "quantity": int(text)
-                    }
-                    save_user_data(user_id, data)
-                    context.user_data.clear()
-                    await update.message.reply_text("✅ SMM API configured successfully!")
-                except ValueError:
-                    await update.message.reply_text("❌ Quantity must be a number!")
+            # Add other button handlers here...
 
-        # [Add other message handlers following the same pattern...]
+        except Exception as e:
+            logger.error(f"Button handler error: {str(e)}")
 
-    except Exception as e:
-        logger.error(f"Error in message handler: {str(e)}")
+    @staticmethod
+    async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            if update.channel_post or not update.effective_user:
+                return
 
-# ==================
-# SERVER MANAGEMENT
-# ==================
+            user_id = str(update.effective_user.id)
+            text = update.message.text
+            data = Database.get_user_data(user_id)
+            logger.info(f"Message from {user_id}: {text[:50]}...")
+
+            if "add_api_step" in context.user_data:
+                step = context.user_data["add_api_step"]
+                
+                if step == 1:
+                    context.user_data["api_url"] = text
+                    context.user_data["add_api_step"] = 2
+                    await update.message.reply_text("Please enter API Key:")
+                
+                elif step == 2:
+                    context.user_data["api_key"] = text
+                    context.user_data["add_api_step"] = 3
+                    await update.message.reply_text("Please enter Service ID:")
+                
+                elif step == 3:
+                    context.user_data["service_id"] = text
+                    context.user_data["add_api_step"] = 4
+                    await update.message.reply_text("Please enter default quantity:")
+                
+                elif step == 4:
+                    try:
+                        data["api"] = {
+                            "url": context.user_data["api_url"],
+                            "key": context.user_data["api_key"],
+                            "service": context.user_data["service_id"],
+                            "quantity": int(text)
+                        }
+                        Database.save_user_data(user_id, data)
+                        context.user_data.clear()
+                        await update.message.reply_text("✅ SMM API configured successfully!")
+                    except ValueError:
+                        await update.message.reply_text("❌ Quantity must be a number!")
+
+            # Add other message handlers here...
+
+        except Exception as e:
+            logger.error(f"Message handler error: {str(e)}")
+
+# ================ SERVER MANAGEMENT ================
 def run_flask():
     """Run Flask server with minimal logging"""
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    app.run(host='0.0.0.0', port=PORT, debug=False)
 
 async def run_bot():
     """Main bot runner with error handling"""
@@ -292,11 +225,11 @@ async def run_bot():
         application = ApplicationBuilder().token(TOKEN).build()
         
         # Add handlers
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_handler(CommandHandler("start", BotHandlers.start))
+        application.add_handler(CallbackQueryHandler(BotHandlers.button_handler))
         application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & ~filters.ChatType.CHANNEL,
-            message_handler
+            BotHandlers.message_handler
         ))
         
         logger.info("Bot starting...")
@@ -305,9 +238,7 @@ async def run_bot():
         logger.critical(f"Bot crashed: {str(e)}")
         raise
 
-# ==================
-# ENTRY POINT
-# ==================
+# ================ MAIN ENTRY POINT ================
 if __name__ == '__main__':
     # Start Flask in a daemon thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
