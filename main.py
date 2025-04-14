@@ -12,7 +12,7 @@ from telegram.ext import (
 )
 
 TOKEN = "7793831886:AAFwa8jlFh7SiC5Q0PKxxh7IrcXP6v1iKUs"
-DATA_FILE = "tmp/data.json"
+DATA_FILE = "data.json"
 
 # Initialize data files
 if not os.path.exists(DATA_FILE):
