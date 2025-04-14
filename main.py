@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 import requests
 
-TOKEN = "7793831886:AAFwa8jlFh7SiC5Q0PKxxh7IrcXP6v1iKUs"
+TOKEN = "7793831886:AAFTL9FWQDjfT97fSV-51jBCA9Tysz8fsKg"
 DATABASE_NAME = "bot_data.db"
 
 # Initialize database
@@ -430,45 +430,5 @@ if __name__ == '__main__':
         filters.ChatType.CHANNEL,
         handle_new_channel_post
     ))
-    from flask import Flask, request
-from telegram import Update
-from telegram.ext import Application
-
-import asyncio
-
-app = Flask(__name__)
-bot_app = ApplicationBuilder().token(TOKEN).build()
-
-# Same handlers as before
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CallbackQueryHandler(button_handler))
-bot_app.add_handler(MessageHandler(
-    filters.TEXT & ~filters.COMMAND & ~filters.ChatType.CHANNEL,
-    message_handler
-))
-bot_app.add_handler(MessageHandler(
-    filters.ChatType.CHANNEL,
-    handle_new_channel_post
-))
-
-@app.route('/webhook', methods=['POST'])
-async def webhook():
-    update = Update.de_json(request.get_json(force=True), bot_app.bot)
-    await bot_app.process_update(update)
-    return 'ok'
-
-@app.route('/')
-def home():
-    return 'Bot is running!'
-
-if __name__ == '__main__':
-    import os
-
-    # Set webhook
-    WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://your-render-url.onrender.com/webhook
-
-    async def setup():
-        await bot_app.bot.set_webhook(WEBHOOK_URL)
-
-    asyncio.run(setup())
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    
+    app.run_polling()
