@@ -19,7 +19,6 @@ def init_db():
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     
-    # Create users table if not exists
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
         user_id TEXT PRIMARY KEY,
@@ -30,7 +29,6 @@ def init_db():
     )
     ''')
     
-    # Create channels table if not exists
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS channels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,11 +47,9 @@ def get_user_data(user_id):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     
-    # Get user API data
     cursor.execute('SELECT api_url, api_key, service_id, quantity FROM users WHERE user_id = ?', (user_id,))
     api_data = cursor.fetchone()
     
-    # Get user channels
     cursor.execute('SELECT channel_username FROM channels WHERE user_id = ?', (user_id,))
     channels = [row[0] for row in cursor.fetchall()]
     
@@ -77,7 +73,6 @@ def save_user_data(user_id, data):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     
-    # Save API data
     api = data.get("api", {})
     cursor.execute('''
     INSERT OR REPLACE INTO users (user_id, api_url, api_key, service_id, quantity)
@@ -90,7 +85,6 @@ def save_user_data(user_id, data):
         api.get("quantity")
     ))
     
-    # Save channels - first remove existing ones
     cursor.execute('DELETE FROM channels WHERE user_id = ?', (user_id,))
     for channel in data.get("channels", []):
         cursor.execute('INSERT INTO channels (user_id, channel_username) VALUES (?, ?)', (user_id, channel))
@@ -136,6 +130,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🛠 Edit SMM", callback_data="edit_smm")],
             ]
             await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
+
+        case "add_smm":
+            context.user_data["add_api_step"] = 1
+            await query.edit_message_text("Please enter SMM API URL:")
 
         case "edit_smm":
             api = data.get("api", {})
@@ -236,11 +234,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text(f"❌ Channel {channel} not found.")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Skip if this is a channel post (handled separately)
     if update.channel_post:
         return
 
-    # Only process user messages
     if not update.effective_user:
         return
 
@@ -359,7 +355,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop("order_link", None)
 
 async def handle_new_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Automatically detect new channel posts and send to SMM panel."""
     if not update.channel_post:
         return
 
@@ -367,12 +362,11 @@ async def handle_new_channel_post(update: Update, context: ContextTypes.DEFAULT_
     message_id = update.channel_post.message_id
 
     if not chat.username:
-        return  # Skip private channels
+        return
 
     channel_mention = f"@{chat.username}"
     post_link = f"https://t.me/{chat.username}/{message_id}"
 
-    # Get all users who have this channel in their list
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     
@@ -392,7 +386,7 @@ async def handle_new_channel_post(update: Update, context: ContextTypes.DEFAULT_
     for user in users:
         user_id, api_url, api_key, service_id, quantity = user
         if not quantity:
-            quantity = 1000  # Default quantity
+            quantity = 1000
             
         try:
             response = requests.post(api_url, data={
@@ -424,17 +418,14 @@ async def handle_new_channel_post(update: Update, context: ContextTypes.DEFAULT_
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
     
-    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # Handle user messages (skip channel posts)
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & ~filters.ChatType.CHANNEL,
         message_handler
     ))
     
-    # Handle channel posts separately
     app.add_handler(MessageHandler(
         filters.ChatType.CHANNEL,
         handle_new_channel_post
