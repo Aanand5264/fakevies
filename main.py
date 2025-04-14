@@ -1,6 +1,5 @@
-import json
+import sqlite3
 import os
-import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -10,30 +9,99 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+import requests
 
 TOKEN = "7793831886:AAFwa8jlFh7SiC5Q0PKxxh7IrcXP6v1iKUs"
-DATA_FILE = "data.json"
+DATABASE_NAME = "bot_data.db"
 
-# Initialize data files
-if not os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "w") as f:
-        json.dump({}, f)
+# Initialize database
+def init_db():
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    # Create users table if not exists
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        api_url TEXT,
+        api_key TEXT,
+        service_id TEXT,
+        quantity INTEGER
+    )
+    ''')
+    
+    # Create channels table if not exists
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS channels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        channel_username TEXT,
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
 
-def load_data():
-    with open(DATA_FILE) as f:
-        return json.load(f)
+init_db()
 
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+def get_user_data(user_id):
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    # Get user API data
+    cursor.execute('SELECT api_url, api_key, service_id, quantity FROM users WHERE user_id = ?', (user_id,))
+    api_data = cursor.fetchone()
+    
+    # Get user channels
+    cursor.execute('SELECT channel_username FROM channels WHERE user_id = ?', (user_id,))
+    channels = [row[0] for row in cursor.fetchall()]
+    
+    conn.close()
+    
+    api_dict = {}
+    if api_data:
+        api_dict = {
+            "url": api_data[0],
+            "key": api_data[1],
+            "service": api_data[2],
+            "quantity": api_data[3]
+        }
+    
+    return {
+        "channels": channels,
+        "api": api_dict
+    }
+
+def save_user_data(user_id, data):
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    # Save API data
+    api = data.get("api", {})
+    cursor.execute('''
+    INSERT OR REPLACE INTO users (user_id, api_url, api_key, service_id, quantity)
+    VALUES (?, ?, ?, ?, ?)
+    ''', (
+        user_id,
+        api.get("url"),
+        api.get("key"),
+        api.get("service"),
+        api.get("quantity")
+    ))
+    
+    # Save channels - first remove existing ones
+    cursor.execute('DELETE FROM channels WHERE user_id = ?', (user_id,))
+    for channel in data.get("channels", []):
+        cursor.execute('INSERT INTO channels (user_id, channel_username) VALUES (?, ?)', (user_id, channel))
+    
+    conn.commit()
+    conn.close()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    data = load_data()
-    if user_id not in data:
-        data[user_id] = {"channels": [], "api": {}}
-        save_data(data)
-
+    data = get_user_data(user_id)
+    
     keyboard = [
         [InlineKeyboardButton("#1 🔧 SMM Settings", callback_data="smm_settings")],
         [InlineKeyboardButton("#2 ➕➖ Channel Add/Remove", callback_data="channel_settings")],
@@ -46,12 +114,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = str(query.from_user.id)
-    data = load_data()
-    data.setdefault(user_id, {"channels": [], "api": {}})
+    data = get_user_data(user_id)
 
     match query.data:
         case "smm_settings":
-            api = data[user_id].get("api", {})
+            api = data.get("api", {})
             if api:
                 message = (
                     "🔧 Current SMM API Settings:\n\n"
@@ -71,7 +138,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
 
         case "edit_smm":
-            api = data[user_id].get("api", {})
+            api = data.get("api", {})
             if not api:
                 await query.edit_message_text("❌ No SMM API found. Please add it first.")
                 return
@@ -112,8 +179,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Enter new default quantity:")
 
         case "remove_api":
-            data[user_id]["api"] = {}
-            save_data(data)
+            data["api"] = {}
+            save_user_data(user_id, data)
             await query.edit_message_text("✅ SMM API configuration has been removed.")
 
         case "channel_settings":
@@ -129,7 +196,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         "Note: The bot must be added as an admin to monitor posts.")
 
         case "remove_channel":
-            channels = data[user_id].get("channels", [])
+            channels = data.get("channels", [])
             if not channels:
                 await query.edit_message_text("❌ No channels to remove.")
                 return
@@ -138,7 +205,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Choose a channel to remove:", reply_markup=InlineKeyboardMarkup(keyboard))
 
         case "check_balance":
-            api = data[user_id].get("api")
+            api = data.get("api")
             if not api:
                 await query.edit_message_text("❌ API not found in your SMM settings!")
                 return
@@ -161,9 +228,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         case _:
             if query.data.startswith("remove_"):
                 channel = query.data.split("_")[1]
-                if channel in data[user_id]["channels"]:
-                    data[user_id]["channels"].remove(channel)
-                    save_data(data)
+                if channel in data.get("channels", []):
+                    data["channels"].remove(channel)
+                    save_user_data(user_id, data)
                     await query.edit_message_text(f"✅ Channel {channel} removed successfully.")
                 else:
                     await query.edit_message_text(f"❌ Channel {channel} not found.")
@@ -179,8 +246,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = str(update.effective_user.id)
     text = update.message.text
-    data = load_data()
-    data.setdefault(user_id, {"channels": [], "api": {}})
+    data = get_user_data(user_id)
 
     if "add_channel_step" in context.user_data:
         step = context.user_data["add_channel_step"]
@@ -191,11 +257,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             try:
-                if "channels" not in data[user_id]:
-                    data[user_id]["channels"] = []
-                if channel not in data[user_id]["channels"]:
-                    data[user_id]["channels"].append(channel)
-                    save_data(data)
+                if channel not in data.get("channels", []):
+                    data["channels"].append(channel)
+                    save_user_data(user_id, data)
                 context.user_data.pop("add_channel_step")
                 await update.message.reply_text(
                     f"✅ Channel {channel} added successfully!\n\n"
@@ -221,13 +285,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == 4:
             try:
                 quantity = int(text)
-                data[user_id]["api"] = {
+                data["api"] = {
                     "url": context.user_data["api_url"],
                     "key": context.user_data["api_key"],
                     "service": context.user_data["service_id"],
                     "quantity": quantity
                 }
-                save_data(data)
+                save_user_data(user_id, data)
                 context.user_data.clear()
                 await update.message.reply_text("✅ SMM API configured successfully!")
             except ValueError:
@@ -246,8 +310,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             value = text.strip()
         
-        data[user_id]["api"][editing] = value
-        save_data(data)
+        data["api"][editing] = value
+        save_user_data(user_id, data)
         
         await update.message.reply_text(f"✅ {editing.replace('_', ' ').title()} updated successfully!")
         context.user_data.pop("editing")
@@ -261,7 +325,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == 2:
             try:
                 qty = int(text)
-                api = data[user_id].get("api")
+                api = data.get("api")
                 if not api:
                     await update.message.reply_text("❌ API not found in your SMM settings! Please add it first.")
                     return
@@ -308,22 +372,33 @@ async def handle_new_channel_post(update: Update, context: ContextTypes.DEFAULT_
     channel_mention = f"@{chat.username}"
     post_link = f"https://t.me/{chat.username}/{message_id}"
 
-    data = load_data()
-    for user_id, user_data in data.items():
-        if not user_data.get("channels") or not user_data.get("api"):
-            continue
+    # Get all users who have this channel in their list
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT DISTINCT u.user_id, u.api_url, u.api_key, u.service_id, u.quantity
+    FROM users u
+    JOIN channels c ON u.user_id = c.user_id
+    WHERE c.channel_username = ?
+    AND u.api_url IS NOT NULL
+    AND u.api_key IS NOT NULL
+    AND u.service_id IS NOT NULL
+    ''', (channel_mention,))
+    
+    users = cursor.fetchall()
+    conn.close()
 
-        if channel_mention not in user_data["channels"]:
-            continue
-
-        api = user_data["api"]
-        quantity = api.get("quantity", 1000)
-
+    for user in users:
+        user_id, api_url, api_key, service_id, quantity = user
+        if not quantity:
+            quantity = 1000  # Default quantity
+            
         try:
-            response = requests.post(api['url'], data={
-                "key": api['key'],
+            response = requests.post(api_url, data={
+                "key": api_key,
                 "action": "add",
-                "service": api['service'],
+                "service": service_id,
                 "link": post_link,
                 "quantity": quantity
             })
@@ -344,7 +419,7 @@ async def handle_new_channel_post(update: Update, context: ContextTypes.DEFAULT_
                     except Exception as e:
                         print(f"Couldn't notify user {user_id}: {str(e)}")
         except Exception as e:
-            print(f"Error processing {post_link}: {str(e)}")
+            print(f"Error processing {post_link} for user {user_id}: {str(e)}")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
