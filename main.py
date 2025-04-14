@@ -15,33 +15,52 @@ from flask import Flask
 import threading
 import asyncio
 
-# Configure logging
+# ======================
+# LOGGING CONFIGURATION
+# ======================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app for health checks
+# Silence noisy libraries
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
+# ==================
+# FLASK APP SETUP
+# ==================
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    # Silent health check endpoint
-    return "AEK Bot is running", 200
+    """Silent health check endpoint for Render"""
+    return "", 200
 
-# Configuration
+# ==================
+# BOT CONFIGURATION
+# ==================
 TOKEN = "7793831886:AAFTL9FWQDjfT97fSV-51jBCA9Tysz8fsKg"
 DATABASE_NAME = "bot_data.db"
 
-# Database functions
+# ==================
+# DATABASE FUNCTIONS
+# ==================
 def init_db():
+    """Initialize database with proper error handling"""
+    conn = None
     try:
-        conn = sqlite3.connect(DATABASE_NAME, timeout=10, check_same_thread=False)
+        conn = sqlite3.connect(
+            DATABASE_NAME,
+            timeout=10,
+            check_same_thread=False
+        )
         cursor = conn.cursor()
+        
+        # Users table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id TEXT PRIMARY KEY,
@@ -50,6 +69,8 @@ def init_db():
             service_id TEXT,
             quantity INTEGER
         )''')
+        
+        # Channels table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS channels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +78,7 @@ def init_db():
             channel_username TEXT,
             FOREIGN KEY (user_id) REFERENCES users (user_id)
         )''')
+        
         conn.commit()
         logger.info("Database initialized successfully")
     except Exception as e:
@@ -68,12 +90,27 @@ def init_db():
 init_db()
 
 def get_user_data(user_id):
+    """Retrieve user data with error handling"""
+    conn = None
     try:
-        conn = sqlite3.connect(DATABASE_NAME, timeout=10, check_same_thread=False)
+        conn = sqlite3.connect(
+            DATABASE_NAME,
+            timeout=10,
+            check_same_thread=False
+        )
         cursor = conn.cursor()
-        cursor.execute('SELECT api_url, api_key, service_id, quantity FROM users WHERE user_id = ?', (user_id,))
+        
+        cursor.execute('''
+        SELECT api_url, api_key, service_id, quantity 
+        FROM users WHERE user_id = ?
+        ''', (user_id,))
         api_data = cursor.fetchone()
-        cursor.execute('SELECT channel_username FROM channels WHERE user_id = ?', (user_id,))
+        
+        cursor.execute('''
+        SELECT channel_username 
+        FROM channels 
+        WHERE user_id = ?
+        ''', (user_id,))
         channels = [row[0] for row in cursor.fetchall()]
         
         return {
@@ -93,31 +130,54 @@ def get_user_data(user_id):
             conn.close()
 
 def save_user_data(user_id, data):
+    """Save user data with error handling"""
+    conn = None
     try:
-        conn = sqlite3.connect(DATABASE_NAME, timeout=10, check_same_thread=False)
+        conn = sqlite3.connect(
+            DATABASE_NAME,
+            timeout=10,
+            check_same_thread=False
+        )
         cursor = conn.cursor()
         api = data.get("api", {})
-        cursor.execute('''
-        INSERT OR REPLACE INTO users (user_id, api_url, api_key, service_id, quantity)
-        VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, api.get("url"), api.get("key"), api.get("service"), api.get("quantity")))
         
+        # Update user data
+        cursor.execute('''
+        INSERT OR REPLACE INTO users 
+        (user_id, api_url, api_key, service_id, quantity)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (
+            user_id,
+            api.get("url"),
+            api.get("key"),
+            api.get("service"),
+            api.get("quantity")
+        ))
+        
+        # Update channels
         cursor.execute('DELETE FROM channels WHERE user_id = ?', (user_id,))
         for channel in data.get("channels", []):
-            cursor.execute('INSERT INTO channels (user_id, channel_username) VALUES (?, ?)', (user_id, channel))
+            cursor.execute('''
+            INSERT INTO channels (user_id, channel_username)
+            VALUES (?, ?)
+            ''', (user_id, channel))
+        
         conn.commit()
-        logger.info(f"Saved data for user {user_id}")
+        logger.info(f"Data saved for user {user_id}")
     except Exception as e:
         logger.error(f"Error saving user data: {str(e)}")
     finally:
         if conn:
             conn.close()
 
-# Bot handlers
+# ==================
+# BOT HANDLERS
+# ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command"""
     try:
         user_id = str(update.effective_user.id)
-        logger.info(f"Start command received from {user_id}")
+        logger.info(f"Start command from user {user_id}")
         
         keyboard = [
             [InlineKeyboardButton("#1 🔧 SMM Settings", callback_data="smm_settings")],
@@ -125,6 +185,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("#3 💰 Check Balance", callback_data="check_balance")],
             [InlineKeyboardButton("#4 Order Views 📈", callback_data="order_views")],
         ]
+        
         await update.message.reply_text(
             "Welcome to AEK Bot!",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -133,6 +194,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in start handler: {str(e)}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all button callbacks"""
     try:
         query = update.callback_query
         await query.answer()
@@ -142,29 +204,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if query.data == "smm_settings":
             api = data.get("api", {})
-            message = ("🔧 Current SMM API Settings:\n\n" +
-                      f"🔗 URL: {api.get('url', 'Not set')}\n" +
-                      f"🔑 Key: {'*' * 8 if api.get('key') else 'Not set'}\n" +
-                      f"🆔 Service ID: {api.get('service', 'Not set')}\n" +
-                      f"📊 Default Quantity: {api.get('quantity', 'Not set')}\n\n" +
-                      "Choose an action:")
+            message = (
+                "🔧 Current SMM API Settings:\n\n"
+                f"🔗 URL: {api.get('url', 'Not set')}\n"
+                f"🔑 Key: {'*' * 8 if api.get('key') else 'Not set'}\n"
+                f"🆔 Service ID: {api.get('service', 'Not set')}\n"
+                f"📊 Default Quantity: {api.get('quantity', 'Not set')}\n\n"
+                "Choose an action:"
+            )
             
             keyboard = [
                 [InlineKeyboardButton("➕ Add SMM API", callback_data="add_smm")],
                 [InlineKeyboardButton("🛠 Edit SMM", callback_data="edit_smm")],
             ]
-            await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
         
         elif query.data == "add_smm":
             context.user_data["add_api_step"] = 1
             await query.edit_message_text("Please enter SMM API URL:")
         
-        # [Add all other button handlers...]
+        # [Add other button handlers following the same pattern...]
 
     except Exception as e:
         logger.error(f"Error in button handler: {str(e)}")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all text messages"""
     try:
         if update.channel_post or not update.effective_user:
             return
@@ -172,22 +240,26 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         text = update.message.text
         data = get_user_data(user_id)
-        logger.info(f"Message received from {user_id}: {text[:50]}...")
+        logger.info(f"Message from {user_id}: {text[:50]}...")
 
         if "add_api_step" in context.user_data:
             step = context.user_data["add_api_step"]
+            
             if step == 1:
                 context.user_data["api_url"] = text
                 context.user_data["add_api_step"] = 2
                 await update.message.reply_text("Please enter API Key:")
+            
             elif step == 2:
                 context.user_data["api_key"] = text
                 context.user_data["add_api_step"] = 3
                 await update.message.reply_text("Please enter Service ID:")
+            
             elif step == 3:
                 context.user_data["service_id"] = text
                 context.user_data["add_api_step"] = 4
                 await update.message.reply_text("Please enter default quantity:")
+            
             elif step == 4:
                 try:
                     data["api"] = {
@@ -202,23 +274,21 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except ValueError:
                     await update.message.reply_text("❌ Quantity must be a number!")
 
-        # [Add other message handlers...]
+        # [Add other message handlers following the same pattern...]
 
     except Exception as e:
         logger.error(f"Error in message handler: {str(e)}")
 
+# ==================
+# SERVER MANAGEMENT
+# ==================
 def run_flask():
-    # Disable Flask's default logging
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.WARNING)
+    """Run Flask server with minimal logging"""
     app.run(host='0.0.0.0', port=8080, debug=False)
 
 async def run_bot():
+    """Main bot runner with error handling"""
     try:
-        # Reduce telegram.ext logging
-        logging.getLogger('httpx').setLevel(logging.WARNING)
-        logging.getLogger('telegram').setLevel(logging.WARNING)
-        
         application = ApplicationBuilder().token(TOKEN).build()
         
         # Add handlers
@@ -229,14 +299,19 @@ async def run_bot():
             message_handler
         ))
         
-        logger.info("Bot is starting...")
+        logger.info("Bot starting...")
         await application.run_polling()
     except Exception as e:
-        logger.error(f"Bot crashed: {str(e)}")
+        logger.critical(f"Bot crashed: {str(e)}")
+        raise
 
+# ==================
+# ENTRY POINT
+# ==================
 if __name__ == '__main__':
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
+    # Start Flask in a daemon thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
+    # Run bot in main thread
     asyncio.run(run_bot())
