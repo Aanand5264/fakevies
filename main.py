@@ -50,7 +50,8 @@ def init_db():
     CREATE TABLE IF NOT EXISTS channels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT,
-        channel_username TEXT,
+        channel_identifier TEXT UNIQUE,
+        is_id BOOLEAN DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES users (user_id)
     )
     ''')
@@ -65,8 +66,8 @@ def get_user_data(user_id):
     cursor.execute('SELECT api_url, api_key, service_id, quantity FROM users WHERE user_id = ?', (user_id,))
     api_data = cursor.fetchone()
     
-    cursor.execute('SELECT channel_username FROM channels WHERE user_id = ?', (user_id,))
-    channels = [row[0] for row in cursor.fetchall()]
+    cursor.execute('SELECT channel_identifier, is_id FROM channels WHERE user_id = ?', (user_id,))
+    channels = cursor.fetchall()
     
     conn.close()
     
@@ -102,7 +103,11 @@ def save_user_data(user_id, data):
     
     cursor.execute('DELETE FROM channels WHERE user_id = ?', (user_id,))
     for channel in data.get("channels", []):
-        cursor.execute('INSERT INTO channels (user_id, channel_username) VALUES (?, ?)', (user_id, channel))
+        identifier, is_id = channel
+        cursor.execute('''
+        INSERT INTO channels (user_id, channel_identifier, is_id)
+        VALUES (?, ?, ?)
+        ''', (user_id, identifier, is_id))
     
     conn.commit()
     conn.close()
@@ -206,15 +211,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         case "add_channel":
             context.user_data["add_channel_step"] = 1
-            await query.edit_message_text("Please enter your channel username (e.g., @your_channel):\n\n"
-                                        "Note: The bot must be added as an admin to monitor posts.")
+            await query.edit_message_text(
+                "Please enter your channel identifier:\n"
+                "For public channels: @username\n"
+                "For private channels: id:12345\n\n"
+                "Note: The bot must be added as an admin to monitor posts."
+            )
 
         case "remove_channel":
             channels = data.get("channels", [])
             if not channels:
                 await query.edit_message_text("❌ No channels to remove.")
                 return
-            keyboard = [[InlineKeyboardButton(channel, callback_data=f"remove_{channel}")] for channel in channels]
+            keyboard = [[InlineKeyboardButton(chan[0], callback_data=f"remove_{chan[0]}")] for chan in channels]
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="channel_settings")])
             await query.edit_message_text("Choose a channel to remove:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -242,12 +251,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         case _:
             if query.data.startswith("remove_"):
                 channel = query.data.split("_")[1]
-                if channel in data.get("channels", []):
-                    data["channels"].remove(channel)
-                    save_user_data(user_id, data)
-                    await query.edit_message_text(f"✅ Channel {channel} removed successfully.")
-                else:
-                    await query.edit_message_text(f"❌ Channel {channel} not found.")
+                new_channels = [chan for chan in data.get("channels", []) if chan[0] != channel]
+                data["channels"] = new_channels
+                save_user_data(user_id, data)
+                await query.edit_message_text(f"✅ Channel {channel} removed successfully.")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.channel_post:
@@ -264,21 +271,36 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         step = context.user_data["add_channel_step"]
         if step == 1:
             channel = text.strip()
-            if not channel.startswith("@"):
-                await update.message.reply_text("❌ Invalid channel format. Please enter a valid channel username starting with @.")
+            
+            # Validate channel identifier format
+            if channel.startswith("@"):
+                is_id = False
+            elif channel.startswith("id:"):
+                try:
+                    int(channel[3:])
+                    is_id = True
+                except ValueError:
+                    await update.message.reply_text("❌ Invalid channel ID format. After 'id:' should be numbers only.")
+                    return
+            else:
+                await update.message.reply_text(
+                    "❌ Invalid format. Please specify channel as:\n"
+                    "- @username for public channels\n"
+                    "- id:12345 for private channels"
+                )
                 return
 
-            try:
-                if channel not in data.get("channels", []):
-                    data["channels"].append(channel)
-                    save_user_data(user_id, data)
-                context.user_data.pop("add_channel_step")
-                await update.message.reply_text(
-                    f"✅ Channel {channel} added successfully!\n\n"
-                    "Note: The bot must be added as an admin to monitor posts."
-                )
-            except Exception as e:
-                await update.message.reply_text(f"❌ Error adding channel: {str(e)}")
+            # Check if already exists
+            current_channels = [chan[0] for chan in data.get("channels", [])]
+            if channel not in current_channels:
+                data.setdefault("channels", []).append((channel, is_id))
+                save_user_data(user_id, data)
+            
+            context.user_data.pop("add_channel_step")
+            await update.message.reply_text(
+                f"✅ Channel {channel} added successfully!\n\n"
+                "Note: The bot must be added as an admin to monitor posts."
+            )
 
     elif "add_api_step" in context.user_data:
         step = context.user_data["add_api_step"]
@@ -377,33 +399,41 @@ async def handle_new_channel_post(update: Update, context: ContextTypes.DEFAULT_
     chat = update.channel_post.chat
     message_id = update.channel_post.message_id
 
-    if not chat.username:
-        return
-
-    channel_mention = f"@{chat.username}"
-    post_link = f"https://t.me/{chat.username}/{message_id}"
+    # Get all possible identifiers
+    channel_id = chat.id
+    channel_username = getattr(chat, 'username', '').lower()
+    
+    print(f"New post detected from channel ID: {channel_id}, username: @{channel_username}")
 
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     
+    # Search by both username and ID
     cursor.execute('''
     SELECT DISTINCT u.user_id, u.api_url, u.api_key, u.service_id, u.quantity
     FROM users u
     JOIN channels c ON u.user_id = c.user_id
-    WHERE c.channel_username = ?
+    WHERE (c.is_id = 0 AND LOWER(c.channel_identifier) = LOWER(?))
+       OR (c.is_id = 1 AND c.channel_identifier = ?)
     AND u.api_url IS NOT NULL
     AND u.api_key IS NOT NULL
     AND u.service_id IS NOT NULL
-    ''', (channel_mention,))
+    ''', (f"@{channel_username}", f"id:{channel_id}"))
     
     users = cursor.fetchall()
     conn.close()
+
+    if not users:
+        print(f"No subscribers found for this channel (tried @{channel_username} and id:{channel_id})")
+        return
 
     for user in users:
         user_id, api_url, api_key, service_id, quantity = user
         if not quantity:
             quantity = 1000
             
+        post_link = f"https://t.me/{channel_username}/{message_id}" if channel_username else f"Channel ID: {channel_id}"
+        
         try:
             response = requests.post(api_url, data={
                 "key": api_key,
@@ -420,7 +450,7 @@ async def handle_new_channel_post(update: Update, context: ContextTypes.DEFAULT_
                         await context.bot.send_message(
                             chat_id=user_id,
                             text=f"🚀 Auto-Order Placed!\n\n"
-                                 f"📢 Channel: {channel_mention}\n"
+                                 f"📢 Channel: {'@'+channel_username if channel_username else 'ID:'+str(channel_id)}\n"
                                  f"🔗 Post: {post_link}\n"
                                  f"📈 Views: {quantity}\n"
                                  f"🆔 Order ID: {res['order']}\n"
@@ -430,6 +460,25 @@ async def handle_new_channel_post(update: Update, context: ContextTypes.DEFAULT_
                         print(f"Couldn't notify user {user_id}: {str(e)}")
         except Exception as e:
             print(f"Error processing {post_link} for user {user_id}: {str(e)}")
+
+async def channel_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command to check if bot can see channel info"""
+    if update.effective_chat.type == "channel":
+        chat = update.effective_chat
+        bot_member = await chat.get_member(context.bot.id)
+        
+        message = (
+            f"📢 Channel Info:\n\n"
+            f"ID: {chat.id}\n"
+            f"Username: @{getattr(chat, 'username', 'N/A')}\n"
+            f"Title: {getattr(chat, 'title', 'N/A')}\n"
+            f"Type: {chat.type}\n\n"
+            f"Bot Status: {bot_member.status}\n"
+            f"Admin Permissions: {getattr(bot_member, 'can_post_messages', 'N/A')}"
+        )
+        await update.message.reply_text(message)
+    else:
+        await update.message.reply_text("⚠️ This command only works in channels")
 
 if __name__ == '__main__':
     # Start the keep-alive server
@@ -442,6 +491,7 @@ if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("channelinfo", channel_info))
     app.add_handler(CallbackQueryHandler(button_handler))
     
     app.add_handler(MessageHandler(
